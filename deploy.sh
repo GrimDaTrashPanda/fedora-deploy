@@ -51,7 +51,7 @@ install_rpm() {
     sudo dnf install -y "$pkg" </dev/null || FAILED+=("$pkg")
   fi
 }
-for pkg in git curl firefox flatpak fastfetch duf glances; do
+for pkg in git curl firefox flatpak fastfetch duf glances pciutils; do
   install_rpm "$pkg"
 done
 sudo dnf install -y @development-tools </dev/null || FAILED+=("development-tools group")
@@ -68,7 +68,56 @@ else
 fi
 echo ""
 
-# ── Phase 4: Update workflow (one script, one launcher) ──────────────────
+# ── Phase 4: RPM Fusion + codecs ──────────────────────────────────────────
+info "Setting up RPM Fusion and codecs..."
+FEDORA_VER=$(rpm -E %fedora)
+if rpm -q rpmfusion-free-release rpmfusion-nonfree-release &>/dev/null; then
+  echo "  [skip] RPM Fusion already enabled"
+else
+  sudo dnf install -y \
+    "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-${FEDORA_VER}.noarch.rpm" \
+    "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-${FEDORA_VER}.noarch.rpm" \
+    </dev/null || FAILED+=("RPM Fusion repos")
+fi
+
+# Cisco OpenH264 (Fedora-managed repo, disabled by default)
+sudo dnf config-manager setopt fedora-cisco-openh264.enabled=1 </dev/null || FAILED+=("openh264 repo")
+for pkg in openh264 gstreamer1-plugin-openh264 mozilla-openh264; do
+  install_rpm "$pkg"
+done
+
+# Full ffmpeg replaces Fedora's codec-limited ffmpeg-free
+if rpm -q ffmpeg &>/dev/null; then
+  echo "  [skip] full ffmpeg already installed"
+else
+  echo "  [install] ffmpeg (swapping out ffmpeg-free)"
+  sudo dnf swap -y ffmpeg-free ffmpeg --allowerasing </dev/null \
+    || sudo dnf install -y ffmpeg --allowerasing </dev/null \
+    || FAILED+=("ffmpeg swap")
+fi
+
+# GStreamer codec groups
+sudo dnf group install -y multimedia sound-and-video \
+  --setopt=install_weak_deps=False --exclude=PackageKit-gstreamer-plugin </dev/null \
+  || FAILED+=("multimedia codec groups")
+
+# Hardware video acceleration, matched to the GPU
+for pkg in ffmpeg-libs libva libva-utils; do
+  install_rpm "$pkg"
+done
+GPU_INFO=$(lspci 2>/dev/null | grep -iE 'vga|3d|display' || true)
+if echo "$GPU_INFO" | grep -qi 'intel'; then
+  install_rpm intel-media-driver
+fi
+if echo "$GPU_INFO" | grep -qiE 'advanced micro devices|radeon'; then
+  install_rpm mesa-va-drivers-freeworld
+fi
+if echo "$GPU_INFO" | grep -qi 'nvidia'; then
+  warn "NVIDIA GPU detected. Drivers are not installed by this script (akmod-nvidia from RPM Fusion is the usual route)."
+fi
+echo ""
+
+# ── Phase 5: Update workflow (one script, one launcher) ──────────────────
 info "Setting up update launcher..."
 mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications"
 
@@ -111,7 +160,7 @@ DESKTOP_EOF
 update-desktop-database "$HOME/.local/share/applications/" 2>/dev/null || true
 echo ""
 
-# ── Phase 5: App loadout (shared with clone-panda-msi) ───────────────────
+# ── Phase 6: App loadout (shared with clone-panda-msi) ───────────────────
 info "Installing app loadout from clone-panda-msi..."
 LOADOUT_DIR="$HOME/.local/share/clone-panda-msi"
 if [ -d "$LOADOUT_DIR/.git" ]; then
